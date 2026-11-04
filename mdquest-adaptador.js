@@ -129,6 +129,8 @@
     const c = el(`<div id="mdq-conta"><span></span><a>Sair</a></div>`);
     c.firstChild.textContent = s.user.email;
     c.querySelector("a").onclick = async () => { await sb.auth.signOut(); location.reload(); };
+    ehEquipe().then((eq) => { if (!eq) return;
+      const imp = document.createElement("a"); imp.textContent = "Importar área comum"; imp.onclick = escolherImportacao; c.appendChild(imp); });
     const pôr = () => document.body.appendChild(c);
     document.body ? pôr() : document.addEventListener("DOMContentLoaded", pôr);
   }
@@ -373,6 +375,45 @@
   };
 
   /* ------------------------------------------------------------------
+     MIGRAÇÃO — importa os arquivos "mdq-comum-*.json" exportados no claude.ai
+     (só aparece para a equipe)
+     ------------------------------------------------------------------ */
+  function escolherImportacao() {
+    const inp = document.createElement("input"); inp.type = "file"; inp.multiple = true; inp.accept = ".json,application/json";
+    inp.onchange = () => importarComum([...inp.files]); inp.click();
+  }
+  async function importarComum(arquivos) {
+    if (!arquivos.length) return;
+    const aviso = (m) => { const s = document.querySelector("#mdq-conta span"); if (s) s.textContent = m; };
+    let docs = 0, pacotes = 0, falhas = [];
+    try {
+      for (const [i, f] of arquivos.entries()) {
+        aviso(`lendo ${i + 1}/${arquivos.length}: ${f.name}`);
+        let j; try { j = JSON.parse(await f.text()); } catch { falhas.push(f.name + " (não é JSON)"); continue; }
+        if (!j || j.tipo !== "mdq-comum") { falhas.push(f.name + " (não é arquivo de migração)"); continue; }
+        const lista = (j.docs || []).map((d) => { const c = limpa(d.caminho); return { caminho: c, colecao: pai(c), doc_id: ultimo(c), dados: d.dados || {} }; });
+        for (let k = 0; k < lista.length; k += 200) {
+          aviso(`${f.name}: gravando ${Math.min(k + 200, lista.length)}/${lista.length}`);
+          const { error } = await sb.from("documentos").upsert(lista.slice(k, k + 200), { onConflict: "caminho" });
+          if (error) throw new Error(f.name + ": " + error.message);
+        }
+        docs += lista.length;
+        for (const a of j.assets || []) {
+          aviso(`${f.name}: enviando pacote ${a.id}`);
+          const id = a.id.includes("/") ? a.id : "comum/" + a.id;
+          const { error } = await sb.storage.from(BUCKET).upload(id, new Blob([a.conteudo], { type: a.contentType || "application/json" }), { upsert: true, contentType: a.contentType || "application/json" });
+          if (error) throw new Error("pacote " + a.id + ": " + error.message);
+          pacotes++;
+        }
+      }
+      alert(`Importação concluída: ${docs} registros e ${pacotes} pacote(s).` + (falhas.length ? "\n\nIgnorados:\n" + falhas.join("\n") : "") + "\n\nRecarregue a página para ver o conteúdo.");
+    } catch (e) {
+      alert("A importação parou: " + (e.message || e) + `\n\nJá gravados: ${docs} registros e ${pacotes} pacote(s). Pode repetir a importação: o que já entrou é apenas regravado.`);
+    }
+    const { data } = await sb.auth.getSession(); aviso(data.session ? data.session.user.email : "");
+  }
+
+  /* ------------------------------------------------------------------
      claude.use(...)
      ------------------------------------------------------------------ */
   window.claude = {
@@ -381,19 +422,4 @@
       if (nome === "db") { await garantirSessao(); return DB; }
       if (nome === "sample") { await garantirSessao(); return sample; }
       if (nome === "downloads") return DOWNLOADS;
-      if (nome === "assets") { await garantirSessao(); return ASSETS; }
-      throw { code: "unavailable", message: nome + " não está disponível no site" };
-    },
-  };
-
-  // mensagens de cota/plano aparecem com o texto claro do servidor
-  window.addEventListener("load", () => {
-    const orig = window.erroMsg;
-    if (typeof orig !== "function") return;
-    const PROPRIOS = ["cota_esgotada", "sem_plano", "rede", "servidor", "chave_servidor", "cors"];
-    window.erroMsg = (e) => (e && e.message && PROPRIOS.includes(e.code)) ? e.message : orig(e);
-  });
-
-  // pede o login já ao abrir a página
-  garantirSessao();
-})();
+      if (nome === "assets") {
